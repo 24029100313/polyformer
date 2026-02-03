@@ -1,0 +1,11 @@
+# Data/outputs (avoid pushing large or generated files)
+datasets/
+outputs/
+pretrained_weights/
+weights/
+*.pt
+*.pth
+*.ckpt
+*.tar
+*.zip
+*.log
