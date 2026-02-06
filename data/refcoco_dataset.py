@@ -12,6 +12,8 @@ from io import BytesIO
 
 import logging
 import warnings
+import json
+import os
 
 import numpy as np
 import torch
@@ -50,6 +52,8 @@ class RefcocoDataset(BaseDataset):
         patch_image_size=512,
         imagenet_default_mean_and_std=False,
         num_bins=1000,
+        max_text_len=0,
+        no_augment=False,
         max_image_size=512
     ):
         super().__init__(split, dataset, bpe, src_dict, tgt_dict)
@@ -57,6 +61,8 @@ class RefcocoDataset(BaseDataset):
         self.max_tgt_length = max_tgt_length
         self.patch_image_size = patch_image_size
         self.num_bins = num_bins
+        self.max_text_len = max_text_len
+        self.no_augment = no_augment
 
         if imagenet_default_mean_and_std:
             mean = IMAGENET_DEFAULT_MEAN
@@ -75,7 +81,32 @@ class RefcocoDataset(BaseDataset):
 
     def __getitem__(self, index):
         data = self.dataset[index]
-        if len(data) == 7:
+        jsonl_sample = None
+        if len(data) == 1:
+            # JSONL mode (remote sensing reproduction): each line is a JSON dict.
+            jsonl_sample = json.loads(data[0])
+            uniq_id = jsonl_sample.get('sample_id')
+            text = (jsonl_sample.get('expr') or '').strip()
+            base64_str = None
+            seg64_str = None
+
+            region = jsonl_sample.get('tight_box_xyxy') or jsonl_sample.get('raw_box_xyxy')
+            if not region or len(region) != 4:
+                raise ValueError(f'Missing bbox for sample_id={uniq_id}: {region}')
+            region_coord = ','.join(str(float(x)) for x in region)
+
+            polygons = jsonl_sample.get('polygons') or []
+            poly_flat = []
+            for poly_xy in polygons:
+                flat = []
+                for pt in poly_xy:
+                    flat.extend([pt[0], pt[1]])
+                poly_flat.append(flat)
+            poly = polygons_to_string(poly_flat) if poly_flat else ''
+            poly_original = poly
+            poly_interpolated = poly
+            train = self.split == 'train'
+        elif len(data) == 7:
             uniq_id, base64_str, seg64_str, text, poly_original, region_coord, poly_interpolated = data
             train = True
         else:
@@ -83,9 +114,29 @@ class RefcocoDataset(BaseDataset):
             train = False
 
         # load image and segmentation labels
-        image = Image.open(BytesIO(base64.urlsafe_b64decode(base64_str))).convert("RGB")
-        label = Image.open(BytesIO(base64.urlsafe_b64decode(seg64_str)))
-        label = np.asarray(label)
+        if jsonl_sample is not None:
+            image_path = jsonl_sample.get('image_path')
+            if not image_path or not os.path.exists(image_path):
+                raise FileNotFoundError(f'Missing image_path for sample_id={uniq_id}: {image_path}')
+            image = Image.open(image_path).convert('RGB')
+
+            mask_path = jsonl_sample.get('mask_path')
+            if mask_path and os.path.exists(mask_path):
+                label = np.asarray(Image.open(mask_path))
+            else:
+                w, h = image.size
+                label = np.zeros((h, w), dtype=np.uint8)
+                polygons = jsonl_sample.get('polygons') or []
+                for poly_xy in polygons:
+                    if len(poly_xy) < 3:
+                        continue
+                    pts = np.asarray(poly_xy, dtype=np.int32).reshape((-1, 1, 2))
+                    cv2.fillPoly(label, [pts], 1)
+        else:
+            image = Image.open(BytesIO(base64.urlsafe_b64decode(base64_str))).convert('RGB')
+            label = np.asarray(Image.open(BytesIO(base64.urlsafe_b64decode(seg64_str))))
+
+        label = (label > 0).astype(np.uint8)
         label = cv2.resize(label, [self.patch_image_size, self.patch_image_size], interpolation=cv2.INTER_NEAREST)
 
         w, h = image.size
@@ -94,7 +145,7 @@ class RefcocoDataset(BaseDataset):
         resize_w = self.patch_image_size
         patch_mask = torch.tensor([True])
 
-        if train:
+        if train and not self.no_augment:
             prob = np.random.uniform()
             if prob < 0.5:
                 polygons_interpolated = string_to_polygons(poly_interpolated)
@@ -217,7 +268,16 @@ class RefcocoDataset(BaseDataset):
 
         id = np.array([s["id"] for s in samples])
         captions = [s["source"] for s in samples]
-        tokenized = self.tokenizer.batch_encode_plus(captions, padding="longest", return_tensors="pt")
+        if self.max_text_len and self.max_text_len > 0:
+            tokenized = self.tokenizer.batch_encode_plus(
+                captions,
+                padding='longest',
+                truncation=True,
+                max_length=self.max_text_len,
+                return_tensors='pt',
+            )
+        else:
+            tokenized = self.tokenizer.batch_encode_plus(captions, padding='longest', return_tensors='pt')
         src_tokens = tokenized["input_ids"]
         att_masks = tokenized["attention_mask"]
         src_lengths = torch.LongTensor(att_masks.ne(0).long().sum())

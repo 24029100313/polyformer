@@ -3,9 +3,17 @@ datasets/
 outputs/
 pretrained_weights/
 weights/
+refer/data/
+polyformer_assets/
 *.pt
 *.pth
 *.ckpt
 *.tar
 *.zip
 *.log
+
+# IDE / Python cache
+.vscode/
+__pycache__/
+*.pyc
+*.pyo

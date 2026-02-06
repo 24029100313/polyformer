@@ -56,6 +56,12 @@ class RefcocoConfig(BaseConfig):
     max_image_size: int = field(
         default=512, metadata={"help": "max image size for normalization"}
     )
+    max_text_len: int = field(
+        default=0, metadata={'help': 'truncate tokenizer length (0 disables)'}
+    )
+    no_augment: bool = field(
+        default=False, metadata={'help': 'disable polygon augmentation'}
+    )
     scst: bool = field(
         default=False, metadata={"help": "Self-critical sequence training"}
     )
@@ -93,6 +99,8 @@ class RefcocoTask(BaseTask):
             patch_image_size=self.cfg.patch_image_size,
             imagenet_default_mean_and_std=self.cfg.imagenet_default_mean_and_std,
             num_bins=self.cfg.num_bins,
+            max_text_len=self.cfg.max_text_len,
+            no_augment=self.cfg.no_augment,
             max_image_size=self.cfg.max_image_size
         )
 
@@ -155,11 +163,23 @@ class RefcocoTask(BaseTask):
             metrics.log_derived("score", compute_score)
 
     def _inference(self, sample, model):
-        hyps = self.inference_step(model, sample)
-        refs = sample['region_coords'].float()
+        gen_out = self.inference_step(model, sample)
+        refs = sample["region_coords"].float()
+
+        # `inference_step()` for RefCOCO returns a variable-length sequence
+        # (box coords + polygon coords + sentinels). For AP score we only need
+        # the first two points (bbox: x1, y1, x2, y2).
+        bbox_hyps = []
+        for out in gen_out:
+            if len(out) < 4:
+                bbox_hyps.append([0.0, 0.0, 0.0, 0.0])
+            else:
+                bbox_hyps.append([float(v) for v in out[:4]])
+        hyps = torch.tensor(bbox_hyps, device=refs.device, dtype=torch.float32)
+
         hyps = hyps * self.cfg.max_image_size
-        hyps[:, ::2] /= sample['w_resize_ratios'].unsqueeze(1)
-        hyps[:, 1::2] /= sample['h_resize_ratios'].unsqueeze(1)
+        hyps[:, ::2] /= sample["w_resize_ratios"].unsqueeze(1)
+        hyps[:, 1::2] /= sample["h_resize_ratios"].unsqueeze(1)
         return hyps, refs
 
     def inference_step(self, model, sample):

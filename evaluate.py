@@ -171,13 +171,20 @@ def cli_main():
     parser.add_argument("--vis_dir", type=str, default=None)
     parser.add_argument("--result_dir", type=str, default=None)
     parser.add_argument("--vis", action='store_true', default=False)
+    parser.add_argument(
+        '--rs-eval-mode',
+        type=str,
+        default='ris',
+        choices=['ris', 'vg'],
+        help='Evaluation mode for RS reproduction: ris uses mask IoU; vg uses box IoU.',
+    )
     args = options.parse_args_and_arch(parser)
     cfg = convert_namespace_to_omegaconf(args)
     if args.result_dir is None:
         args.result_dir = args.vis_dir
     distributed_utils.call_main(
         cfg, main, ema_eval=args.ema_eval, beam_search_vqa_eval=args.beam_search_vqa_eval, zero_shot=args.zero_shot,
-        vis_dir=args.vis_dir, vis=args.vis, result_dir=args.result_dir
+        vis_dir=args.vis_dir, vis=args.vis, result_dir=args.result_dir, rs_eval_mode=args.rs_eval_mode
     )
 
 

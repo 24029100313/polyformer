@@ -69,7 +69,7 @@ def eval_refcoco(task, generator, models, sample, **kwargs):
         mask = mask > 0
         return mask.astype(np.uint8)
 
-    def _calculate_score(hyps, hyps_det, refs, sample, n_poly_pred, n_poly_gt, vis=True, vis_dir=None):
+    def _calculate_score(hyps, hyps_det, refs, sample, n_poly_pred, n_poly_gt, rs_eval_mode='ris', vis=True, vis_dir=None):
         if vis:
             os.makedirs(vis_dir, exist_ok=True)
 
@@ -95,6 +95,27 @@ def eval_refcoco(task, generator, models, sample, **kwargs):
         bboxes = bboxes.to(sample['w_resize_ratios'].device)
         ap_scores = _calculate_ap_score(bboxes.float(), sample['region_coords'].float())
         for i in range(b):
+            if rs_eval_mode == 'vg':
+                pred_box = bboxes[i].float()
+                gt_box = sample['region_coords'][i].float()
+
+                ix1 = torch.maximum(pred_box[0], gt_box[0])
+                iy1 = torch.maximum(pred_box[1], gt_box[1])
+                ix2 = torch.minimum(pred_box[2], gt_box[2])
+                iy2 = torch.minimum(pred_box[3], gt_box[3])
+                iw = torch.clamp(ix2 - ix1, min=0)
+                ih = torch.clamp(iy2 - iy1, min=0)
+                inter = iw * ih
+                area_p = torch.clamp(pred_box[2] - pred_box[0], min=0) * torch.clamp(pred_box[3] - pred_box[1], min=0)
+                area_g = torch.clamp(gt_box[2] - gt_box[0], min=0) * torch.clamp(gt_box[3] - gt_box[1], min=0)
+                union = area_p + area_g - inter
+
+                this_iou = float((inter / (union + 1e-6)).item()) if union.item() > 0 else 0.0
+                IoU.append(this_iou)
+                F_score.append(this_iou)
+                cum_I.append(float(inter.item()))
+                cum_U.append(float(union.item()))
+                continue
             hyps_i = hyps[i]
             gt_mask = refs[i]
             pred_mask = get_mask_from_codes(hyps_i, gt_mask.shape[0:2])
@@ -192,6 +213,7 @@ def eval_refcoco(task, generator, models, sample, **kwargs):
 
     iou_scores, f_scores, ap_scores, cum_I, cum_U = _calculate_score(hyps, hyps_det, gt, sample, n_poly_pred,
                                                                      sample['n_poly'],
+                                                                     rs_eval_mode=kwargs.get('rs_eval_mode', 'ris'),
                                                                      vis=kwargs['vis'], vis_dir=kwargs['vis_dir'])
     result_dir = kwargs['result_dir']
     os.makedirs(result_dir, exist_ok=True)
